@@ -2180,10 +2180,6 @@
             });
         }
 
-        async function loadNetworkSnapshot() {
-            throw new Error('Ingen lokal nettverkssnapshot konfigurert');
-        }
-
         // Kjør i nettleserkonsollen når GTFS-dataene er lastet for å laste ned øyeblikksbilder.
         window.exportNetworkSnapshot = function() {
             const features = [];
@@ -2226,18 +2222,6 @@
         }
 
         async function loadSkyssNetwork() {
-            drawStatus.textContent = 'Laster rutenett...';
-            try {
-                const snapshot = await loadNetworkSnapshot();
-                updateSkyssRoutes();
-                updateAtlasScore();
-                if (atlasLayerToggle.checked && atlasAreas.length) renderAtlasAreaLayer();
-                const stamp = snapshot.generated ? new Date(snapshot.generated).toLocaleDateString('nb-NO') : 'ukjent dato';
-                drawStatus.textContent = `Rutenett lastet: ${snapshot.routes} ruter (rutedata per ${stamp})`;
-                return;
-            } catch (snapshotError) {
-                console.warn('Statisk rutenett utilgjengelig, laster GTFS', snapshotError);
-            }
             drawStatus.textContent = 'Loading Skyss routes from Entur GTFS...';
             try {
                 const response = await fetchExternal(ENTUR_GTFS_URL);
@@ -2344,7 +2328,6 @@
         }
 
         function loadTrainNetwork() {
-            if (networkSnapshotLoaded) return Promise.resolve();
             if (trainNetworkPromise) return trainNetworkPromise;
             trainNetworkPromise = (async function() {
                 drawStatus.textContent = 'Laster togruter fra Entur GTFS (Vy)...';
