@@ -1,0 +1,84 @@
+param(
+    [string]$AreasPath = (Join-Path $PSScriptRoot 'areas.geojson')
+)
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+$gtfsUrl = 'https://storage.googleapis.com/marduk-production/outbound/gtfs/rb_sky-aggregated-gtfs.zip'
+$zipPath = Join-Path $env:TEMP 'skyss-gtfs.zip'
+
+Invoke-WebRequest -Uri $gtfsUrl -OutFile $zipPath
+$archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+
+function Read-GtfsCsv([string]$name) {
+    $entry = $archive.GetEntry($name)
+    if (-not $entry) { throw "Mangler $name i GTFS-filen" }
+
+    $reader = [System.IO.StreamReader]::new($entry.Open())
+    try { @($reader.ReadToEnd() | ConvertFrom-Csv) }
+    finally { $reader.Dispose() }
+}
+
+try {
+    $areas = Get-Content -Raw $AreasPath | ConvertFrom-Json
+    $routes = Read-GtfsCsv 'routes.txt'
+    $trips = Read-GtfsCsv 'trips.txt'
+    $shapes = Read-GtfsCsv 'shapes.txt'
+    $stops = Read-GtfsCsv 'stops.txt'
+
+    $routeIndex = @{}
+    $routes | Where-Object { $_.route_type -in @('0', '3') } |
+        ForEach-Object { $routeIndex[$_.route_id] = $_ }
+
+    $shapeRoutes = @{}
+    $trips | Where-Object { $routeIndex.ContainsKey($_.route_id) -and $_.shape_id } |
+        ForEach-Object {
+            if (-not $shapeRoutes.ContainsKey($_.shape_id)) {
+                $shapeRoutes[$_.shape_id] = $_.route_id
+            }
+        }
+
+    $shapePoints = @{}
+    $shapes | ForEach-Object {
+        if ($shapeRoutes.ContainsKey($_.shape_id)) {
+            if (-not $shapePoints.ContainsKey($_.shape_id)) {
+                $shapePoints[$_.shape_id] = [System.Collections.Generic.List[object]]::new()
+            }
+            $shapePoints[$_.shape_id].Add($_)
+        }
+    }
+
+    $network = foreach ($shapeId in $shapePoints.Keys) {
+        $route = $routeIndex[$shapeRoutes[$shapeId]]
+        $points = @($shapePoints[$shapeId] |
+            Sort-Object { [int]$_.shape_pt_sequence } |
+            ForEach-Object {
+                @([math]::Round([double]$_.shape_pt_lon, 5), [math]::Round([double]$_.shape_pt_lat, 5))
+            })
+
+        if ($points.Count -ge 2) {
+            [ordered]@{
+                routeId = $route.route_id
+                transportType = if ($route.route_type -eq '0') { 'tram' } else { 'localBus' }
+                routeShortName = $route.route_short_name
+                routeLongName = $route.route_long_name
+                coordinates = $points
+            }
+        }
+    }
+
+    $areas | Add-Member -Force -NotePropertyName staticData -NotePropertyValue ([ordered]@{
+        generated = (Get-Date).ToUniversalTime().ToString('o')
+        network = @($network)
+        stops = @($stops | ForEach-Object {
+            @([math]::Round([double]$_.stop_lat, 5), [math]::Round([double]$_.stop_lon, 5))
+        })
+    })
+
+    $areas | ConvertTo-Json -Depth 20 -Compress |
+        Set-Content -Encoding utf8NoBOM $AreasPath
+}
+finally {
+    $archive.Dispose()
+    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+}
