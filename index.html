@@ -478,6 +478,10 @@
         const ENTUR_GTFS_URL = 'https://storage.googleapis.com/marduk-production/outbound/gtfs/rb_sky-aggregated-gtfs.zip';
         // Skyss-feeden inneholder ingen tog, så togruter (Bergensbanen m.fl.) hentes fra Vy-feeden.
         const ENTUR_TRAIN_GTFS_URL = 'https://storage.googleapis.com/marduk-production/outbound/gtfs/rb_vyg-aggregated-gtfs.zip';
+        const CORS_PROXIES = [
+            url => 'https://thingproxy.freeboard.io/fetch/' + url,
+            url => 'https://corsproxy.io/?url=' + encodeURIComponent(url)
+        ];
         let trainNetworkPromise = null;
         let skyssNetworkPromise = null;
         const NVDB_VEGOBJEKTER_URL = 'https://nvdbapiles.atlas.vegvesen.no/vegobjekter/api/v4/vegobjekter';
@@ -618,10 +622,8 @@
 
         // ─── Norsk mobilitetsatlas som kartlag ─────────────────────────────
         const BERGEN_BYDEL_URL = 'https://kart.bergen.kommune.no/arcgis/rest/services/Basis_kartdata/Bydeler/MapServer/1/query?where=1%3D1&outFields=BYDEL&outSR=4326&f=geojson';
-        // Forhåndsgenerert av tools/build-static-geojson.mjs; live-API-ene under brukes bare som fallback.
-        const STATIC_AREAS_URL = 'data/areas.geojson';
-        // Ferdig beregnede bydelstall (areal, holdeplasser, score, ruter) fra window.exportAtlasMetrics().
-        const STATIC_ATLAS_METRICS_URL = 'data/atlas-metrics.json';
+        // All lokal, statisk kartdata ligger sammen med denne filen i areas.geojson.
+        const STATIC_AREAS_URL = 'areas.geojson';
         const OVERPASS_API_URL = 'https://overpass-api.de/api/interpreter';
         const NOMINATIM_LOOKUP_URL = 'https://nominatim.openstreetmap.org/lookup';
         const NOMINATIM_SEARCH_URL = 'https://nominatim.openstreetmap.org/search';
@@ -705,6 +707,22 @@
             throw lastError || new Error('Ukjent nettverksfeil');
         }
 
+        async function fetchExternal(url, options = {}) {
+            const proxyOptions = { ...options, headers: { ...(options.headers || {}) } };
+            delete proxyOptions.headers['X-Client'];
+            let lastError = null;
+            for (const proxy of CORS_PROXIES) {
+                try {
+                    const response = await fetch(proxy(url), proxyOptions);
+                    if (response.ok) return response;
+                    lastError = new Error(`Proxy svarte ${response.status}`);
+                } catch (error) {
+                    lastError = error;
+                }
+            }
+            throw lastError || new Error('Ingen CORS-proxy er tilgjengelig');
+        }
+
         function rectangleToPolygon(minLng, minLat, maxLng, maxLat) {
             return {
                 type: 'Polygon',
@@ -786,24 +804,19 @@
         function loadStaticAreas() {
             if (staticAreasPromise) return staticAreasPromise;
             staticAreasPromise = (async function() {
-                const [response, metricsResponse] = await Promise.all([
-                    fetch(STATIC_AREAS_URL, { cache: 'force-cache' }),
-                    fetch(STATIC_ATLAS_METRICS_URL, { cache: 'force-cache' }).catch(() => null)
-                ]);
+                const response = await fetch(STATIC_AREAS_URL, { cache: 'force-cache' });
                 if (!response.ok) throw new Error(`Statiske områder feilet (${response.status})`);
                 const data = await response.json();
-                const metrics = metricsResponse && metricsResponse.ok ? (await metricsResponse.json()).areas || {} : {};
                 const bydeler = [];
                 const kommuner = new Map();
                 (data.features || []).forEach(feature => {
                     if (!feature || !feature.geometry || !feature.properties) return;
                     if (feature.properties.kind === 'bydel') {
-                        const precomputed = metrics[feature.properties.name];
                         bydeler.push({
                             name: feature.properties.name,
                             kind: feature.properties.label || 'Bydel i Bergen',
                             geometry: feature.geometry,
-                            precomputed: precomputed ? { ...precomputed, routeIds: new Set(precomputed.routeIds || []) } : null
+                            precomputed: null
                         });
                     } else if (feature.properties.kind === 'kommune') {
                         kommuner.set(String(feature.properties.nummer), { name: feature.properties.name, geometry: feature.geometry });
@@ -989,7 +1002,7 @@
             return result;
         }
 
-        // Kjør i nettleserkonsollen når rutenett og holdeplasser er lastet, og legg filen i data/.
+        // Kjør i nettleserkonsollen når rutenett og holdeplasser er lastet for å laste ned et øyeblikksbilde.
         window.exportAtlasMetrics = function() {
             const areas = {};
             atlasAreas.forEach(area => {
@@ -1829,7 +1842,7 @@
             let url = `${NVDB_VEGOBJEKTER_URL}/${typeId}?polygon=${encodeURIComponent(wkt)}&srid=4326&inkluder=egenskaper,geometri&antall=1000${extraQuery}`;
             const objekter = [];
             for (let page = 0; page < NVDB_MAX_PAGES && url; page += 1) {
-                const response = await fetch(url, { headers: { 'X-Client': NVDB_X_CLIENT, Accept: 'application/json' } });
+                const response = await fetchExternal(url, { headers: { 'X-Client': NVDB_X_CLIENT, Accept: 'application/json' } });
                 if (!response.ok) throw new Error(`NVDB (vegobjekttype ${typeId}) svarte ${response.status}`);
                 const data = await response.json();
                 objekter.push(...(data.objekter || []));
@@ -1838,31 +1851,10 @@
             return objekter;
         }
 
-        // Bydelene er faste, så NVDB-treffene deres er forhåndsgenerert med window.exportNvdbSnapshot().
-        const STATIC_NVDB_URL = 'data/nvdb-bydel.json';
         // Bare egenskapene appen faktisk leser tas vare på i snapshotet.
         const NVDB_KEPT_EGENSKAPER = new Set([2021, 1114, 1081, 10592, 1075]);
-        let staticNvdbPromise = null;
-
-        function loadStaticNvdb() {
-            if (staticNvdbPromise) return staticNvdbPromise;
-            staticNvdbPromise = (async function() {
-                const response = await fetch(STATIC_NVDB_URL, { cache: 'force-cache' });
-                if (!response.ok) throw new Error(`NVDB-snapshot feilet (${response.status})`);
-                return (await response.json()).areas || {};
-            }()).catch(error => {
-                console.warn('NVDB-snapshot utilgjengelig, henter live fra NVDB', error);
-                return {};
-            });
-            return staticNvdbPromise;
-        }
 
         async function fetchNvdbObjects(typeId, polygon, area) {
-            if (area) {
-                const areaSnapshot = (await loadStaticNvdb())[area.name];
-                const objects = areaSnapshot && areaSnapshot[typeId];
-                if (objects) return objects;
-            }
             return fetchNvdbVegobjekter(typeId, polygon);
         }
 
@@ -2188,59 +2180,11 @@
             });
         }
 
-        // Forhåndsgenerert rutenett (tools/README: kjør exportNetworkSnapshot() i konsollen for å lage filene).
-        // GTFS-feeden lastes bare hvis snapshotet mangler.
-        const STATIC_NETWORK_URL = 'data/network.geojson';
-        const STATIC_STOPS_URL = 'data/stops.json';
-        let networkSnapshotLoaded = false;
-
-        function addSnapshotRouteLine(properties, coordinates) {
-            const points = coordinates.map(position => [position[1], position[0]]);
-            if (points.length < 2) return;
-            const isTrain = properties.transportType === 'train';
-            const baseWeight = isTrain ? 4 : 3;
-            const baseOpacity = isTrain ? 0.85 : 0.72;
-            const line = L.polyline(points, { color: transportColors[properties.transportType], weight: baseWeight, opacity: baseOpacity });
-            line.transportType = properties.transportType;
-            line.routeId = properties.routeId;
-            line.routeShortName = properties.routeShortName || '';
-            line.routeLongName = properties.routeLongName || properties.routeShortName || '';
-            line.baseWeight = baseWeight;
-            line.baseOpacity = baseOpacity;
-            line.tripsPerDay = properties.tripsPerDay || 1;
-            line.routeTripsPerDay = properties.routeTripsPerDay || line.tripsPerDay;
-            line.departuresPerHour = describeFrequencyRate(line.routeTripsPerDay, line.transportType);
-            wireRouteLine(line);
-            skyssNetwork.addLayer(line);
-        }
-
         async function loadNetworkSnapshot() {
-            const [networkResponse, stopsResponse] = await Promise.all([
-                fetch(STATIC_NETWORK_URL, { cache: 'force-cache' }),
-                fetch(STATIC_STOPS_URL, { cache: 'force-cache' })
-            ]);
-            if (!networkResponse.ok || !stopsResponse.ok) throw new Error('Snapshot ikke tilgjengelig');
-            const network = await networkResponse.json();
-            const stopData = await stopsResponse.json();
-            const features = (network.features || []).filter(feature => feature && feature.geometry && feature.properties);
-            if (!features.length) throw new Error('Snapshot inneholder ingen ruter');
-            features.forEach(feature => addSnapshotRouteLine(feature.properties, feature.geometry.coordinates));
-            Object.entries(stopData.routeStopCounts || {}).forEach(([routeId, count]) => routeStopCounts.set(routeId, count));
-            atlasStops = (stopData.stops || []).map(stop => ({
-                lat: stop[0],
-                lng: stop[1],
-                departuresPerHour: stop[2],
-                transportTypes: stop[3] || []
-            }));
-            atlasSettlementStops = (stopData.settlementStops || []).map(stop => ({ lat: stop[0], lng: stop[1] }));
-            buildSettlementIndex();
-            atlasDataLoaded = true;
-            networkSnapshotLoaded = true;
-            trainNetworkPromise = Promise.resolve();
-            return { routes: new Set(features.map(feature => feature.properties.routeId)).size, generated: network.generated };
+            throw new Error('Ingen lokal nettverkssnapshot konfigurert');
         }
 
-        // Kjør i nettleserkonsollen når GTFS-dataene er lastet, og legg filene i data/.
+        // Kjør i nettleserkonsollen når GTFS-dataene er lastet for å laste ned øyeblikksbilder.
         window.exportNetworkSnapshot = function() {
             const features = [];
             skyssNetwork.eachLayer(line => {
@@ -2296,7 +2240,7 @@
             }
             drawStatus.textContent = 'Loading Skyss routes from Entur GTFS...';
             try {
-                const response = await fetch(ENTUR_GTFS_URL);
+                const response = await fetchExternal(ENTUR_GTFS_URL);
                 if (!response.ok) throw new Error(`GTFS download failed (${response.status})`);
                 const archive = await JSZip.loadAsync(await response.arrayBuffer());
                 const [agencies, routes, trips, shapes, calendar, calendarDates] = await Promise.all([
@@ -2404,7 +2348,7 @@
             if (trainNetworkPromise) return trainNetworkPromise;
             trainNetworkPromise = (async function() {
                 drawStatus.textContent = 'Laster togruter fra Entur GTFS (Vy)...';
-                const response = await fetch(ENTUR_TRAIN_GTFS_URL);
+                const response = await fetchExternal(ENTUR_TRAIN_GTFS_URL);
                 if (!response.ok) throw new Error(`GTFS download failed (${response.status})`);
                 const archive = await JSZip.loadAsync(await response.arrayBuffer());
                 const [routes, trips, stops, stopTimes] = await Promise.all([
