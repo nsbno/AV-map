@@ -478,6 +478,7 @@
         const ENTUR_GTFS_URL = 'https://storage.googleapis.com/marduk-production/outbound/gtfs/rb_sky-aggregated-gtfs.zip';
         // Skyss-feeden inneholder ingen tog, så togruter (Bergensbanen m.fl.) hentes fra Vy-feeden.
         const ENTUR_TRAIN_GTFS_URL = 'https://storage.googleapis.com/marduk-production/outbound/gtfs/rb_vyg-aggregated-gtfs.zip';
+        const SAME_ORIGIN_PROXY_PATH = '/api/proxy?url=';
         const CORS_PROXIES = [
             url => 'https://thingproxy.freeboard.io/fetch/' + url,
             url => 'https://corsproxy.io/?url=' + encodeURIComponent(url)
@@ -708,6 +709,13 @@
         }
 
         async function fetchExternal(url, options = {}) {
+            try {
+                const localResponse = await fetch(SAME_ORIGIN_PROXY_PATH + encodeURIComponent(url), options);
+                if (localResponse.ok) return localResponse;
+            } catch (error) {
+                // Fall back to public proxies below.
+            }
+
             const proxyOptions = { ...options, headers: { ...(options.headers || {}) } };
             delete proxyOptions.headers['X-Client'];
             let lastError = null;
