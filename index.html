@@ -151,6 +151,7 @@
                     <button id="clear-polygons" type="button">Fjern</button>
                 </div>
                 <div id="draw-status" class="draw-status" role="status" aria-live="polite">Klar til å tegne</div>
+                <button id="download-area-data" type="button" style="width:100%;margin-top:10px">Last ned områdedata (NVDB + GTFS)</button>
             </section>
             <section class="panel-section">
                 <h2>Kartlag</h2>
@@ -390,6 +391,7 @@
 
         const drawPolygonButton = document.getElementById('draw-polygon');
         const clearPolygonsButton = document.getElementById('clear-polygons');
+        const downloadAreaDataButton = document.getElementById('download-area-data');
         const drawPanel = document.querySelector('.draw-panel');
         const hidePanelButton = document.getElementById('hide-panel');
         const showPanelButton = document.getElementById('show-panel');
@@ -1033,6 +1035,82 @@
             Object.assign(document.createElement('a'), { href: url, download: 'atlas-metrics.json' }).click();
             URL.revokeObjectURL(url);
             return `${Object.keys(areas).length} bydeler eksportert`;
+        };
+
+        function downloadJsonSnapshot(name, payload) {
+            const url = URL.createObjectURL(new Blob([JSON.stringify(payload)], { type: 'application/json' }));
+            Object.assign(document.createElement('a'), { href: url, download: name }).click();
+            URL.revokeObjectURL(url);
+        }
+
+        function gtfsSnapshotForPolygon(polygon) {
+            const routes = [];
+            const routeIds = new Set();
+            skyssNetwork.eachLayer(line => {
+                if (!line.getLatLngs().some(point => pointInPolygon(point, polygon))) return;
+                routeIds.add(line.routeId);
+                routes.push({
+                    routeId: line.routeId,
+                    transportType: line.transportType,
+                    routeShortName: line.routeShortName,
+                    routeLongName: line.routeLongName,
+                    tripsPerDay: Number((line.tripsPerDay || 0).toFixed(2)),
+                    routeTripsPerDay: Number((line.routeTripsPerDay || 0).toFixed(2)),
+                    departuresPerHour: Number((line.departuresPerHour || 0).toFixed(2)),
+                    coordinates: line.getLatLngs().map(point => [Number(point.lng.toFixed(5)), Number(point.lat.toFixed(5))])
+                });
+            });
+            const stops = atlasStops
+                .filter(stop => pointInPolygon(L.latLng(stop.lat, stop.lng), polygon))
+                .map(stop => ({
+                    lat: Number(stop.lat.toFixed(5)),
+                    lng: Number(stop.lng.toFixed(5)),
+                    departuresPerHour: Number(stop.departuresPerHour.toFixed(2)),
+                    transportTypes: stop.transportTypes
+                }));
+            const routeStopCountsSnapshot = {};
+            routeIds.forEach(routeId => {
+                if (routeStopCounts.has(routeId)) routeStopCountsSnapshot[routeId] = routeStopCounts.get(routeId);
+            });
+            return {
+                routeCount: routes.length,
+                stopCount: stops.length,
+                routes,
+                stops,
+                routeStopCounts: routeStopCountsSnapshot
+            };
+        }
+
+        async function nvdbSnapshotForPolygon(polygon) {
+            const entries = await Promise.all(Object.entries(NVDB_TYPES).map(async function([name, typeId]) {
+                const objects = await fetchNvdbObjects(typeId, polygon, selectedAtlasArea);
+                return [name, { typeId, count: objects.length, objects: objects.map(slimNvdbObject) }];
+            }));
+            return Object.fromEntries(entries);
+        }
+
+        window.exportAreaDataSnapshot = async function() {
+            const polygon = getActivePolygon();
+            if (!polygon) throw new Error('Velg eller tegn et område først');
+            await ensureSkyssNetwork();
+            if (isTransportTypeSelected('train')) await loadTrainNetwork();
+            await ensureAtlasData();
+            const [gtfs, nvdb] = await Promise.all([
+                Promise.resolve(gtfsSnapshotForPolygon(polygon)),
+                nvdbSnapshotForPolygon(polygon)
+            ]);
+            const payload = {
+                generated: new Date().toISOString(),
+                area: {
+                    name: selectedAtlasArea ? selectedAtlasArea.name : 'egentegnet polygon',
+                    bounds: polygon.getBounds(),
+                    polygon: polygon.getLatLngs()[0].map(point => [Number(point.lng.toFixed(6)), Number(point.lat.toFixed(6))])
+                },
+                gtfs,
+                nvdb
+            };
+            downloadJsonSnapshot('map-area-data.json', payload);
+            return `Områdedata eksportert: ${gtfs.routeCount} ruter, ${gtfs.stopCount} holdeplasser`;
         };
 
         function renderAtlasAreaLayer() {            atlasAreaLayer.clearLayers();
@@ -2444,6 +2522,16 @@
         });
 
         routeClearButton.addEventListener('click', clearRouteSelection);
+
+        downloadAreaDataButton.addEventListener('click', async function() {
+            drawStatus.textContent = 'Laster GTFS- og NVDB-data for valgt område...';
+            try {
+                drawStatus.textContent = await window.exportAreaDataSnapshot();
+            } catch (error) {
+                console.error(error);
+                drawStatus.textContent = `Kunne ikke laste ned områdedata: ${error.message}`;
+            }
+        });
 
         atlasLayerToggle.addEventListener('change', function() {
             atlasSection.style.display = atlasLayerToggle.checked ? 'block' : 'none';
