@@ -1877,8 +1877,8 @@
             const groups = isMulti ? body.split('),(') : [body];
             return groups.map(group => group.replace(/[()]/g, '').split(',').map(pointText => {
                 const [lat, lon] = pointText.trim().split(/\s+/).map(Number);
-                return L.latLng(lat, lon);
-            })).filter(points => points.length > 0);
+                return Number.isFinite(lat) && Number.isFinite(lon) ? L.latLng(lat, lon) : null;
+            }).filter(Boolean)).filter(points => points.length > 0);
         }
 
         function nvdbEgenskap(objekt, egenskapId) {
@@ -1954,7 +1954,10 @@
             return {
                 id: properties.id || feature.id,
                 geometri: { wkt: lines.length > 1 ? `MULTILINESTRING (${wkt.replaceAll('LINESTRING ', '')})` : wkt },
-                egenskaper: properties.egenskaper || []
+                egenskaper: (properties.egenskaper || []).map(egenskap => ({
+                    id: egenskap.id,
+                    verdi: egenskap.verdi ?? egenskap.value
+                }))
             };
         }
 
