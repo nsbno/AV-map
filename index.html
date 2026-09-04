@@ -1883,7 +1883,7 @@
             if (!wkt) return [];
             const isMulti = wkt.startsWith('MULTILINESTRING');
             const body = wkt.replace(/^[A-Z]+\s*Z?\s*/, '').replace(/^\(|\)$/g, '');
-            const groups = isMulti ? body.split('),(') : [body];
+            const groups = isMulti ? Array.from(body.matchAll(/\(([^()]*)\)/g), match => match[1]) : [body];
             return groups.map(group => group.replace(/[()]/g, '').split(',').map(pointText => {
                 const [lat, lon] = pointText.trim().split(/\s+/).map(Number);
                 return safeNvdbLatLng(lat, lon);
@@ -1954,8 +1954,20 @@
 
         function localNvdbObject(feature) {
             const properties = feature.properties || {};
-            const coordinates = feature.geometry && feature.geometry.coordinates;
-            const sourceLines = feature.geometry && feature.geometry.type === 'MultiLineString' ? coordinates : [coordinates];
+            const geometry = feature.geometry || {};
+            const coordinates = geometry.coordinates;
+            if (geometry.type === 'Point') {
+                const point = localNvdbLineCoordinates(coordinates)[0];
+                return {
+                    id: properties.id || feature.id,
+                    geometri: { wkt: point ? `POINT (${point[1]} ${point[0]})` : '' },
+                    egenskaper: (properties.egenskaper || []).map(egenskap => ({
+                        id: egenskap.id,
+                        verdi: egenskap.verdi ?? egenskap.value
+                    }))
+                };
+            }
+            const sourceLines = geometry.type === 'MultiLineString' ? coordinates : [coordinates];
             const lines = sourceLines.map(localNvdbLineCoordinates).filter(line => line.length > 0);
             const wkt = lines
                 .map(line => `LINESTRING (${line.map(point => `${point[1]} ${point[0]}`).join(', ')})`)
