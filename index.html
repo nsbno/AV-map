@@ -1870,6 +1870,15 @@
         }
 
         // NVDB returns geometry as WKT text with coordinates ordered "lat lon height" when srid=4326 is requested.
+        function safeNvdbLatLng(lat, lon) {
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+            try {
+                return L.latLng(lat, lon);
+            } catch (error) {
+                return null;
+            }
+        }
+
         function parseNvdbWkt(wkt) {
             if (!wkt) return [];
             const isMulti = wkt.startsWith('MULTILINESTRING');
@@ -1877,7 +1886,7 @@
             const groups = isMulti ? body.split('),(') : [body];
             return groups.map(group => group.replace(/[()]/g, '').split(',').map(pointText => {
                 const [lat, lon] = pointText.trim().split(/\s+/).map(Number);
-                return Number.isFinite(lat) && Number.isFinite(lon) ? L.latLng(lat, lon) : null;
+                return safeNvdbLatLng(lat, lon);
             }).filter(Boolean)).filter(points => points.length > 0);
         }
 
@@ -1919,7 +1928,7 @@
 
         async function ensureLocalNvdbData() {
             if (!localNvdbPromise) {
-                localNvdbPromise = fetch(LOCAL_NVDB_URL, { cache: 'force-cache' }).then(async response => {
+                localNvdbPromise = fetch(LOCAL_NVDB_URL, { cache: 'no-store' }).then(async response => {
                     if (!response.ok) throw new Error(`Kunne ikke lese ${LOCAL_NVDB_URL} (${response.status})`);
                     const data = await response.json();
                     localNvdbFeatures = data.features || [];
