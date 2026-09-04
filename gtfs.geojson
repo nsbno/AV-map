@@ -1,1 +1,45 @@
-{"type":"FeatureCollection","generated":"2026-09-03T19:58:45.0734404Z","source":"https://storage.googleapis.com/marduk-production/outbound/gtfs/rb_sky-aggregated-gtfs.zip","features":[]}
+{
+  "type": "FeatureCollection",
+  "generated": "2026-09-04T00:00:00Z",
+  "source": "https://storage.googleapis.com/marduk-production/outbound/gtfs/rb_sky-aggregated-gtfs.zip",
+  "description": "Basisdata for AV-map. Denne filen skal fylles av et script som henter og aggregerer GTFS-dataene som trengs i appen: stoppesteder, linjegeometri og frekvensgrunnlag.",
+  "data_requirements": {
+    "stops": {
+      "description": "Stoppesteder som kan vises som punkter i kartet.",
+      "fields": [
+        "stop_id",
+        "stop_name",
+        "parent_station",
+        "lat",
+        "lon",
+        "transport_mode"
+      ]
+    },
+    "lines": {
+      "description": "Linjeruter/geometri som kan tegnes i kartet.",
+      "fields": [
+        "route_id",
+        "route_short_name",
+        "route_long_name",
+        "route_type",
+        "trip_headsign",
+        "shape_id",
+        "geometry"
+      ]
+    },
+    "frequency": {
+      "description": "Datagrunnlag for å beregne frekvens per linje og/eller stopp basert på avgangstider.",
+      "fields": [
+        "route_id",
+        "direction_id",
+        "service_id",
+        "trip_id",
+        "stop_id",
+        "arrival_time",
+        "departure_time",
+        "headway_secs"
+      ]
+    }
+  },
+  "features": []
+}
