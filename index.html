@@ -1933,12 +1933,22 @@
             return Number(properties.typeId || properties.type_id || properties.vegobjekttypeId || properties.vegobjekttype_id || properties.type);
         }
 
+        function localNvdbLineCoordinates(coordinates) {
+            if (!Array.isArray(coordinates)) return [];
+            if (typeof coordinates[0] !== 'number') return coordinates.filter(point => Array.isArray(point) && point.length >= 2);
+            const points = [];
+            for (let index = 0; index + 1 < coordinates.length; index += 2) {
+                points.push([coordinates[index], coordinates[index + 1]]);
+            }
+            return points;
+        }
+
         function localNvdbObject(feature) {
             const properties = feature.properties || {};
             const coordinates = feature.geometry && feature.geometry.coordinates;
-            const lines = feature.geometry && feature.geometry.type === 'MultiLineString' ? coordinates : [coordinates];
+            const sourceLines = feature.geometry && feature.geometry.type === 'MultiLineString' ? coordinates : [coordinates];
+            const lines = sourceLines.map(localNvdbLineCoordinates).filter(line => line.length > 0);
             const wkt = lines
-                .filter(line => Array.isArray(line))
                 .map(line => `LINESTRING (${line.map(point => `${point[1]} ${point[0]}`).join(', ')})`)
                 .join(', ');
             return {
