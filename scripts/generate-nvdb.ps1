@@ -82,7 +82,7 @@ foreach ($area in $areas.features) {
     $polygon = Get-NvdbPolygon $area.geometry
 
     foreach ($typeId in $NvdbTypes) {
-        $url = "$NvdbBaseUrl/$typeId?polygon=$([uri]::EscapeDataString($polygon))&srid=4326&inkluder=egenskaper,geometri&antall=1000"
+        $url = "${NvdbBaseUrl}/${typeId}?polygon=$([uri]::EscapeDataString($polygon))&srid=4326&inkluder=egenskaper,geometri&antall=1000"
         while ($url) {
             $page = Invoke-RestMethod -Uri $url -Headers $headers
             foreach ($object in @($page.objekter)) {
