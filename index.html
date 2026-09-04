@@ -151,7 +151,6 @@
                     <button id="clear-polygons" type="button">Fjern</button>
                 </div>
                 <div id="draw-status" class="draw-status" role="status" aria-live="polite">Klar til å tegne</div>
-                <button id="download-area-data" type="button" style="width:100%;margin-top:10px">Last ned områdedata (NVDB + GTFS)</button>
             </section>
             <section class="panel-section">
                 <h2>Kartlag</h2>
@@ -391,7 +390,6 @@
 
         const drawPolygonButton = document.getElementById('draw-polygon');
         const clearPolygonsButton = document.getElementById('clear-polygons');
-        const downloadAreaDataButton = document.getElementById('download-area-data');
         const drawPanel = document.querySelector('.draw-panel');
         const hidePanelButton = document.getElementById('hide-panel');
         const showPanelButton = document.getElementById('show-panel');
@@ -477,20 +475,19 @@
         // Invalideres når holdeplassdata eller bebyggelsesindeks endres, slik at bydel-skår kan gjenbrukes trygt.
         let atlasScoreVersion = 0;
         const atlasScoreCache = new Map();
-        const ENTUR_GTFS_URL = 'https://storage.googleapis.com/marduk-production/outbound/gtfs/rb_sky-aggregated-gtfs.zip';
-        // Skyss-feeden inneholder ingen tog, så togruter (Bergensbanen m.fl.) hentes fra Vy-feeden.
-        const ENTUR_TRAIN_GTFS_URL = 'https://storage.googleapis.com/marduk-production/outbound/gtfs/rb_vyg-aggregated-gtfs.zip';
+        const LOCAL_GTFS_URL = 'gtfs.geojson';
+        const LOCAL_NVDB_URL = 'nvdb.geojson';
         const SAME_ORIGIN_PROXY_PATH = '/api/proxy?url=';
         const CORS_PROXIES = [
             url => 'https://thingproxy.freeboard.io/fetch/' + url,
             url => 'https://corsproxy.io/?url=' + encodeURIComponent(url)
         ];
-        let trainNetworkPromise = null;
         let skyssNetworkPromise = null;
-        const NVDB_VEGOBJEKTER_URL = 'https://nvdbapiles.atlas.vegvesen.no/vegobjekter/api/v4/vegobjekter';
-        const NVDB_X_CLIENT = 'Bergen-mobilitetskart-prototype';
         const NVDB_TYPES = { speed: 105, roundabout: 37, tunnel: 67, transitHub: 42 };
         const MIN_TRANSIT_HUB_STOPPUNKT = 3;
+        const NVDB_KEPT_EGENSKAPER = new Set([2021, 1114, 1081, 10592, 1075]);
+        let localNvdbFeatures = [];
+        let localNvdbPromise = null;
         let roadDataCache = { bboxKey: null, data: null };
         const transportColors = {
             train: '#b23a48',
@@ -1093,7 +1090,6 @@
             const polygon = getActivePolygon();
             if (!polygon) throw new Error('Velg eller tegn et område først');
             await ensureSkyssNetwork();
-            if (isTransportTypeSelected('train')) await loadTrainNetwork();
             await ensureAtlasData();
             const [gtfs, nvdb] = await Promise.all([
                 Promise.resolve(gtfsSnapshotForPolygon(polygon)),
@@ -1921,27 +1917,43 @@
             return L.polygon(expanded);
         }
 
-        const NVDB_MAX_PAGES = 4;
-
-        async function fetchNvdbVegobjekter(typeId, polygon, extraQuery = '') {
-            const wkt = polygonToNvdbWkt(nvdbQueryPolygon(polygon));
-            let url = `${NVDB_VEGOBJEKTER_URL}/${typeId}?polygon=${encodeURIComponent(wkt)}&srid=4326&inkluder=egenskaper,geometri&antall=1000${extraQuery}`;
-            const objekter = [];
-            for (let page = 0; page < NVDB_MAX_PAGES && url; page += 1) {
-                const response = await fetchExternal(url, { headers: { 'X-Client': NVDB_X_CLIENT, Accept: 'application/json' } });
-                if (!response.ok) throw new Error(`NVDB (vegobjekttype ${typeId}) svarte ${response.status}`);
-                const data = await response.json();
-                objekter.push(...(data.objekter || []));
-                url = data.metadata && data.metadata.neste && data.metadata.neste.href;
+        async function ensureLocalNvdbData() {
+            if (!localNvdbPromise) {
+                localNvdbPromise = fetch(LOCAL_NVDB_URL, { cache: 'force-cache' }).then(async response => {
+                    if (!response.ok) throw new Error(`Kunne ikke lese ${LOCAL_NVDB_URL} (${response.status})`);
+                    const data = await response.json();
+                    localNvdbFeatures = data.features || [];
+                });
             }
-            return objekter;
+            return localNvdbPromise;
         }
 
-        // Bare egenskapene appen faktisk leser tas vare på i snapshotet.
-        const NVDB_KEPT_EGENSKAPER = new Set([2021, 1114, 1081, 10592, 1075]);
+        function localNvdbTypeId(feature) {
+            const properties = feature.properties || {};
+            return Number(properties.typeId || properties.type_id || properties.vegobjekttypeId || properties.vegobjekttype_id || properties.type);
+        }
+
+        function localNvdbObject(feature) {
+            const properties = feature.properties || {};
+            const coordinates = feature.geometry && feature.geometry.coordinates;
+            const lines = feature.geometry && feature.geometry.type === 'MultiLineString' ? coordinates : [coordinates];
+            const wkt = lines
+                .filter(line => Array.isArray(line))
+                .map(line => `LINESTRING (${line.map(point => `${point[1]} ${point[0]}`).join(', ')})`)
+                .join(', ');
+            return {
+                id: properties.id || feature.id,
+                geometri: { wkt: lines.length > 1 ? `MULTILINESTRING (${wkt.replaceAll('LINESTRING ', '')})` : wkt },
+                egenskaper: properties.egenskaper || []
+            };
+        }
 
         async function fetchNvdbObjects(typeId, polygon, area) {
-            return fetchNvdbVegobjekter(typeId, polygon);
+            await ensureLocalNvdbData();
+            return localNvdbFeatures
+                .filter(feature => localNvdbTypeId(feature) === typeId)
+                .map(localNvdbObject)
+                .filter(objekt => parseNvdbWkt(objekt.geometri.wkt).some(points => points.some(point => pointInPolygon(point, polygon))));
         }
 
         function slimNvdbObject(objekt) {
@@ -1954,14 +1966,14 @@
             };
         }
 
-        // Kjør i nettleserkonsollen én gang; henter alle NVDB-typer for hver bydel og laster ned filen.
+        // Kjør i nettleserkonsollen for å laste ned områdevise uttrekk fra den lokale NVDB-filen.
         window.exportNvdbSnapshot = async function() {
             const areas = {};
             for (const area of atlasAreas) {
                 const polygon = areaToPolygon(area);
                 areas[area.name] = {};
                 for (const typeId of Object.values(NVDB_TYPES)) {
-                    const objects = await fetchNvdbVegobjekter(typeId, polygon);
+                    const objects = await fetchNvdbObjects(typeId, polygon, area);
                     areas[area.name][typeId] = objects.map(slimNvdbObject);
                     console.log(`${area.name} · type ${typeId}: ${objects.length} objekter`);
                 }
@@ -2308,102 +2320,38 @@
         }
 
         async function loadSkyssNetwork() {
-            drawStatus.textContent = 'Loading Skyss routes from Entur GTFS...';
+            drawStatus.textContent = 'Laster lokale GTFS-data...';
             try {
-                const response = await fetchExternal(ENTUR_GTFS_URL);
-                if (!response.ok) throw new Error(`GTFS download failed (${response.status})`);
-                const archive = await JSZip.loadAsync(await response.arrayBuffer());
-                const [agencies, routes, trips, shapes, calendar, calendarDates] = await Promise.all([
-                    readGtfsCsvFile(archive, 'agency.txt'),
-                    readGtfsCsvFile(archive, 'routes.txt'),
-                    readGtfsCsvFile(archive, 'trips.txt'),
-                    readGtfsCsvFile(archive, 'shapes.txt'),
-                    readGtfsCsvFile(archive, 'calendar.txt', true),
-                    readGtfsCsvFile(archive, 'calendar_dates.txt', true)
-                ]);
-
-                const skyssAgencyIds = new Set(agencies
-                    .filter(agency => /skyss/i.test(agency.agency_name || '') || !agency.agency_name)
-                    .map(agency => agency.agency_id));
-                const skyssRoutes = new Map(routes
-                    .filter(route => skyssAgencyIds.has(route.agency_id))
-                    .map(route => [route.route_id, route]));
-                const bergenTransportRoutes = new Map(Array.from(skyssRoutes.entries())
-                    .filter(([, route]) => ['bus', 'tram'].includes(getTransportType(route.route_type))));
-                const skyssTrips = trips.filter(trip => bergenTransportRoutes.has(trip.route_id));
-                const { shares: serviceDayShares, defaultShare } = computeServiceDayShares(calendar, calendarDates);
-                // Avganger telles per shape (retning) for å vite hvilken variant en linje er,
-                // og summeres også per rute (alle retninger/varianter) for popup-tekst og frekvensfilter.
-                const shapeDailyTrips = new Map();
-                const routeDailyTrips = new Map();
-                skyssTrips.forEach(trip => {
-                    const dailyShare = serviceDayShares.get(trip.service_id) ?? defaultShare;
-                    shapeDailyTrips.set(trip.shape_id, (shapeDailyTrips.get(trip.shape_id) || 0) + dailyShare);
-                    routeDailyTrips.set(trip.route_id, (routeDailyTrips.get(trip.route_id) || 0) + dailyShare);
-                });
-                atlasArchive = archive;
-                const shapeRouteIds = new Map(skyssTrips.map(trip => [trip.shape_id, trip.route_id]));
-                const groupedShapes = new Map();
-                const localRouteIds = new Set();
-
-                shapes.forEach(point => {
-                    const routeId = shapeRouteIds.get(point.shape_id);
-                    if (!routeId) return;
-                    if (!groupedShapes.has(point.shape_id)) groupedShapes.set(point.shape_id, []);
-                    groupedShapes.get(point.shape_id).push([Number(point.shape_pt_lat), Number(point.shape_pt_lon), Number(point.shape_pt_sequence)]);
-                });
-
-                const routesOutsideBergen = new Set();
-                groupedShapes.forEach((points, shapeId) => {
-                    const routeId = shapeRouteIds.get(shapeId);
-                    if (points.some(point => !pointInStudyArea(L.latLng(point[0], point[1])))) routesOutsideBergen.add(routeId);
-                });
-
-                groupedShapes.forEach((points, shapeId) => {
-                    points.sort((first, second) => first[2] - second[2]);
-                    const route = skyssRoutes.get(shapeRouteIds.get(shapeId));
-                    if (!route) return;
-                    const baseType = getTransportType(route.route_type);
-                    const transportType = baseType === 'bus' ? classifyBusTransportType(route, routesOutsideBergen.has(route.route_id)) : baseType;
-                    if (transportType !== 'longDistanceBus') localRouteIds.add(route.route_id);
-                    const line = L.polyline(points.map(point => [point[0], point[1]]), {
+                const response = await fetch(LOCAL_GTFS_URL, { cache: 'force-cache' });
+                if (!response.ok) throw new Error(`Kunne ikke lese ${LOCAL_GTFS_URL} (${response.status})`);
+                const data = await response.json();
+                const features = (data.features || []).filter(feature => feature.geometry && feature.geometry.type === 'LineString');
+                features.forEach(feature => {
+                    const route = feature.properties || {};
+                    const transportType = route.transportType || route.transport_type || 'localBus';
+                    const routeId = route.routeId || route.route_id || feature.id || `${skyssNetwork.getLayers().length}`;
+                    const line = L.polyline(feature.geometry.coordinates.map(point => [point[1], point[0]]), {
                         color: transportColors[transportType],
                         weight: 3,
                         opacity: 0.72
                     });
                     line.transportType = transportType;
-                    line.routeId = route.route_id;
-                    line.routeShortName = route.route_short_name || route.route_long_name || '';
-                    line.routeLongName = route.route_long_name || route.route_short_name || '';
+                    line.routeId = routeId;
+                    line.routeShortName = route.routeShortName || route.route_short_name || route.routeLongName || route.route_long_name || '';
+                    line.routeLongName = route.routeLongName || route.route_long_name || line.routeShortName;
                     line.baseWeight = 3;
                     line.baseOpacity = 0.72;
-                    line.tripsPerDay = shapeDailyTrips.get(shapeId) || 1;
-                    line.routeTripsPerDay = routeDailyTrips.get(route.route_id) || line.tripsPerDay;
+                    line.tripsPerDay = Number(route.tripsPerDay || route.trips_per_day || 1);
+                    line.routeTripsPerDay = Number(route.routeTripsPerDay || route.route_trips_per_day || line.tripsPerDay);
                     line.departuresPerHour = describeFrequencyRate(line.routeTripsPerDay, transportType);
                     wireRouteLine(line);
                     skyssNetwork.addLayer(line);
                 });
-
-                atlasTrips = skyssTrips
-                    .filter(trip => localRouteIds.has(trip.route_id))
-                    .map(trip => {
-                        const route = skyssRoutes.get(trip.route_id);
-                        const baseType = getTransportType(route.route_type);
-                        return {
-                            trip_id: trip.trip_id,
-                            service_id: trip.service_id,
-                            route_id: trip.route_id,
-                            transportType: baseType === 'bus' ? classifyBusTransportType(route, routesOutsideBergen.has(route.route_id)) : baseType
-                        };
-                    });
-
                 updateSkyssRoutes();
-                drawStatus.textContent = `Bergen lokalbusser og Bybanen lastet: ${bergenTransportRoutes.size} ruter`;
-                if (getActivePolygon() || atlasLayerToggle.checked) ensureAtlasData();
-                if (skyssNetworkToggle.checked && isTransportTypeSelected('train')) loadTrainNetwork();
+                drawStatus.textContent = `Lokale GTFS-ruter lastet: ${features.length}`;
             } catch (error) {
                 console.error(error);
-                drawStatus.textContent = `Could not load Skyss network: ${error.message}`;
+                drawStatus.textContent = `Kunne ikke laste lokale GTFS-data: ${error.message}`;
                 skyssNetworkToggle.checked = false;
             }
         }
@@ -2414,92 +2362,12 @@
         }
 
         function loadTrainNetwork() {
-            if (trainNetworkPromise) return trainNetworkPromise;
-            trainNetworkPromise = (async function() {
-                drawStatus.textContent = 'Laster togruter fra Entur GTFS (Vy)...';
-                const response = await fetchExternal(ENTUR_TRAIN_GTFS_URL);
-                if (!response.ok) throw new Error(`GTFS download failed (${response.status})`);
-                const archive = await JSZip.loadAsync(await response.arrayBuffer());
-                const [routes, trips, stops, stopTimes] = await Promise.all([
-                    readGtfsCsvFile(archive, 'routes.txt'),
-                    readGtfsCsvFile(archive, 'trips.txt'),
-                    readGtfsCsvFile(archive, 'stops.txt'),
-                    readGtfsCsvFile(archive, 'stop_times.txt')
-                ]);
-
-                const trainRoutes = new Map(routes
-                    .filter(route => getTransportType(route.route_type) === 'train')
-                    .map(route => [route.route_id, route]));
-                const tripRouteIds = new Map();
-                trips.forEach(trip => {
-                    if (trainRoutes.has(trip.route_id)) tripRouteIds.set(trip.trip_id, trip.route_id);
-                });
-                const stopPositions = new Map(stops
-                    .filter(stop => stop.stop_lat && stop.stop_lon)
-                    .map(stop => [stop.stop_id, [Number(stop.stop_lat), Number(stop.stop_lon), stop.stop_name]]));
-
-                // shapes.txt i Vy-feeden er flere hundre MB, så traseen tegnes gjennom stasjonene i stedet.
-                const tripStops = new Map();
-                stopTimes.forEach(entry => {
-                    if (!tripRouteIds.has(entry.trip_id)) return;
-                    const position = stopPositions.get(entry.stop_id);
-                    if (!position) return;
-                    if (!tripStops.has(entry.trip_id)) tripStops.set(entry.trip_id, []);
-                    tripStops.get(entry.trip_id).push([Number(entry.stop_sequence), position]);
-                });
-
-                const routeTrips = new Map();
-                tripStops.forEach((entries, tripId) => {
-                    const routeId = tripRouteIds.get(tripId);
-                    const record = routeTrips.get(routeId) || { count: 0, longest: null };
-                    record.count += 1;
-                    if (!record.longest || entries.length > record.longest.length) record.longest = entries;
-                    routeTrips.set(routeId, record);
-                });
-
-                let drawn = 0;
-                routeTrips.forEach((record, routeId) => {
-                    const entries = record.longest.slice().sort((first, second) => first[0] - second[0]);
-                    const points = entries.map(entry => [entry[1][0], entry[1][1]]);
-                    if (points.length < 2) return;
-                    if (!points.some(point => pointInStudyArea(L.latLng(point[0], point[1])))) return;
-                    const route = trainRoutes.get(routeId);
-                    const line = L.polyline(points, {
-                        color: transportColors.train,
-                        weight: 4,
-                        opacity: 0.85
-                    });
-                    line.transportType = 'train';
-                    line.routeId = routeId;
-                    line.routeShortName = route.route_short_name || 'Tog';
-                    line.routeLongName = route.route_long_name || route.route_short_name || 'Tog';
-                    line.baseWeight = 4;
-                    line.baseOpacity = 0.85;
-                    line.tripsPerDay = Math.max(1, Math.round(record.count / 7));
-                    line.routeTripsPerDay = line.tripsPerDay;
-                    line.departuresPerHour = describeFrequencyRate(line.routeTripsPerDay, 'train');
-                    routeStopCounts.set(routeId, entries.length);
-                    wireRouteLine(line);
-                    skyssNetwork.addLayer(line);
-                    drawn += 1;
-                });
-
-                drawStatus.textContent = drawn
-                    ? `Togruter lastet: ${drawn}`
-                    : 'Fant ingen togruter i området';
-                updateSkyssRoutes();
-            }()).catch(error => {
-                console.error(error);
-                drawStatus.textContent = `Kunne ikke laste togruter: ${error.message}`;
-                trainNetworkPromise = null;
-            });
-            return trainNetworkPromise;
+            return ensureSkyssNetwork();
         }
 
         skyssNetworkToggle.addEventListener('change', function() {
             transportSection.style.display = skyssNetworkToggle.checked ? 'block' : 'none';
             if (skyssNetworkToggle.checked) {
-                if (isTransportTypeSelected('train')) loadTrainNetwork();
                 updateSkyssRoutes();
             }
             else {
@@ -2510,7 +2378,6 @@
 
         transportTypeToggles.forEach(toggle => {
             toggle.addEventListener('change', function() {
-                if (this.dataset.transportType === 'train' && this.checked) loadTrainNetwork();
                 clearRouteSelection();
                 updateSkyssRoutes();
             });
@@ -2522,16 +2389,6 @@
         });
 
         routeClearButton.addEventListener('click', clearRouteSelection);
-
-        downloadAreaDataButton.addEventListener('click', async function() {
-            drawStatus.textContent = 'Laster GTFS- og NVDB-data for valgt område...';
-            try {
-                drawStatus.textContent = await window.exportAreaDataSnapshot();
-            } catch (error) {
-                console.error(error);
-                drawStatus.textContent = `Kunne ikke laste ned områdedata: ${error.message}`;
-            }
-        });
 
         atlasLayerToggle.addEventListener('change', function() {
             atlasSection.style.display = atlasLayerToggle.checked ? 'block' : 'none';
@@ -2643,6 +2500,7 @@
         updateAnalysisButton();
         updateAtlasAreaLayer();
         ensureSkyssNetwork();
+        ensureLocalNvdbData().catch(error => console.error(error));
         // Forhåndslaster bydelsgrenser og mobilitetsindeks-data i bakgrunnen, slik at kartlaget
         // vises umiddelbart når brukeren skrur det på i etterkant i stedet for å måtte vente da.
         loadAtlasAreas().catch(() => {});
