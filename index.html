@@ -1974,8 +1974,9 @@
             await ensureLocalNvdbData();
             return localNvdbFeatures
                 .filter(feature => localNvdbTypeId(feature) === typeId)
+                .filter(feature => !area || (feature.properties && feature.properties.bydel === area.name))
                 .map(localNvdbObject)
-                .filter(objekt => parseNvdbWkt(objekt.geometri.wkt).some(points => points.some(point => pointInPolygon(point, polygon))));
+                .filter(objekt => area || parseNvdbWkt(objekt.geometri.wkt).some(points => points.some(point => pointInPolygon(point, polygon))));
         }
 
         function slimNvdbObject(objekt) {

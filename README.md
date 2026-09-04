@@ -29,3 +29,13 @@ pwsh -File ./scripts/generate-gtfs.ps1 -InputZipPath /path/to/feed.zip
   - line features (`LineString`) with route identifiers/names/type and trip/service metadata
 - `frequency` containing grouped scheduled-service metadata for line/stop frequency calculations
 - top-level metadata (`generated`, `source`, `counts`, `description`)
+
+## Generate `nvdb.geojson`
+
+The NVDB generator fetches speed limits, roundabouts, tunnels, and public-transport hubs for every Bergen bydel. It writes standard GeoJSON, including valid `[longitude, latitude]` coordinates for point objects.
+
+```powershell
+pwsh -File ./scripts/generate-nvdb.ps1
+```
+
+The script uses `areas.geojson` as its area source and overwrites `nvdb.geojson` by default.
