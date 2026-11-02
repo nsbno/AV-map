@@ -103,9 +103,12 @@ function dataApiURL(url) {
 }
 
 async function requestJSON(url, options = {}, signal) {
+  const backendAvailable = await hasApiBackend();
   const headers = new Headers(options.headers);
-  if (location.protocol !== 'file:') { headers.delete('ET-Client-Name'); headers.delete('X-Client'); }
-  const response = await fetch(dataApiURL(url), { ...options, headers, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(25000)]) : AbortSignal.timeout(25000) });
+  if (backendAvailable) { headers.delete('ET-Client-Name'); headers.delete('X-Client'); }
+  const target = new URL(url, location.href);
+  const endpoint = backendAvailable ? dataApiURL(url) : target.href;
+  const response = await fetch(endpoint, { ...options, headers, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(25000)]) : AbortSignal.timeout(25000) });
   if (!response.ok) {
     const details = await response.json().catch(() => null);
     throw new Error(details?.error || 'HTTP ' + response.status);
@@ -116,6 +119,16 @@ async function requestJSON(url, options = {}, signal) {
 let osmRequestQueue = Promise.resolve();
 let osmNextRequestAt = 0;
 let osmCooldownUntil = 0;
+let apiBackendPromise;
+
+async function hasApiBackend() {
+  if (location.protocol === 'file:') return false;
+  if (!apiBackendPromise) {
+    apiBackendPromise = fetch(new URL('api/health', location.href), { cache: 'no-store', signal: AbortSignal.timeout(2500) })
+      .then(response => response.ok).catch(() => false);
+  }
+  return apiBackendPromise;
+}
 
 function waitForOsm(milliseconds, signal) {
   if (signal?.aborted) return Promise.reject(signal.reason || new DOMException('Avbrutt', 'AbortError'));
@@ -140,8 +153,9 @@ async function requestText(url, signal) {
     await waitForOsm(Math.max(0, osmNextRequestAt - Date.now()), signal);
     try {
       const target = new URL(url);
-      const isOsmProxy = target.origin === 'https://api.openstreetmap.org'
-        && target.pathname === '/api/0.6/map' && location.protocol !== 'file:';
+      const isOsmProxy = await hasApiBackend()
+        && target.origin === 'https://api.openstreetmap.org'
+        && target.pathname === '/api/0.6/map';
       const headers = { Accept: 'application/xml' };
       const options = { headers };
       if (isOsmProxy) {
@@ -149,7 +163,7 @@ async function requestText(url, signal) {
         options.method = 'POST';
         options.body = JSON.stringify({ bbox: target.searchParams.get('bbox') });
       }
-      const apiURL = isOsmProxy ? dataApiURL(target.origin + target.pathname) : dataApiURL(url);
+      const apiURL = isOsmProxy ? dataApiURL(target.origin + target.pathname) : target.href;
       const requestTimeout = 10000;
       const response = await fetch(apiURL, {
         ...options,
