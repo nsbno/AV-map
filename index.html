@@ -122,7 +122,7 @@ h1,h2,p{margin:0}h2{font:500 11px 'DM Mono',monospace;text-transform:uppercase;m
       }
       for (const file of ['map-engine.js', 'transit-state.js', 'analysis-app.js']) {
         status.textContent = 'Starter ' + file + ' …';
-        await loadScript(['./' + file + '?v=20261030-35'], file);
+        await loadScript(['./' + file + '?v=20261102-37'], file);
       }
     } catch (error) {
       status.textContent = 'Oppstartsfeil: ' + error.message;
